@@ -206,7 +206,7 @@ def write_manifest() -> None:
         "sit": (frames: [(index: 4, duration_ms: 520), (index: 5, duration_ms: 520)], looped: true),
         "sleep": (frames: [(index: 6, duration_ms: 620), (index: 7, duration_ms: 620), (index: 40, duration_ms: 620), (index: 7, duration_ms: 620)], looped: true),
         "happy": (frames: [(index: 24, duration_ms: 130), (index: 25, duration_ms: 130), (index: 26, duration_ms: 130), (index: 27, duration_ms: 130), (index: 28, duration_ms: 130), (index: 29, duration_ms: 130)], looped: true),
-        "poke": (frames: [(index: 32, duration_ms: 120), (index: 33, duration_ms: 150), (index: 34, duration_ms: 150), (index: 35, duration_ms: 160)], looped: false),
+        "poke": (frames: [(index: 32, duration_ms: 120), (index: 33, duration_ms: 130), (index: 34, duration_ms: 150), (index: 35, duration_ms: 170), (index: 36, duration_ms: 210), (index: 37, duration_ms: 260), (index: 38, duration_ms: 340), (index: 39, duration_ms: 760)], looped: false),
         "dance": (frames: [(index: 16, duration_ms: 120), (index: 17, duration_ms: 120), (index: 18, duration_ms: 120), (index: 19, duration_ms: 120), (index: 20, duration_ms: 120), (index: 21, duration_ms: 120), (index: 22, duration_ms: 120), (index: 23, duration_ms: 120)], looped: true),
     },
     hit_zones: [

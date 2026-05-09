@@ -19,6 +19,8 @@ const DEFAULT_MONITOR_HEIGHT: i32 = 1080;
 const SURFACE_PADDING: i32 = 18;
 const FRAME_INTERVAL_MS: u64 = 100;
 const SHM_BUFFER_COUNT: usize = 3;
+const LEFT_BUTTON: u32 = 0x110;
+const DRAG_THRESHOLD_PX: i32 = 4;
 
 #[derive(Clone, Debug)]
 enum DesktopCommand {
@@ -63,6 +65,7 @@ pub fn run() -> Result<()> {
         scale,
         last_pointer: (0, 0),
         quit: false,
+        drag: None,
         buffers: Vec::new(),
         buffer_cursor: 0,
         bounds: Bounds {
@@ -179,6 +182,12 @@ pub fn run() -> Result<()> {
                     let x = *surface_x as i32;
                     let y = *surface_y as i32;
                     state.last_pointer = (x, y);
+
+                    if state.drag_to_pointer(x, y) {
+                        event_loop.request_refresh_all(RefreshRequest::NextFrame);
+                        return ReturnData::None;
+                    }
+
                     let local_x = (x - SURFACE_PADDING) / state.scale as i32;
                     let local_y = (y - SURFACE_PADDING) / state.scale as i32;
                     if state.gesture.pointer_moved(
@@ -196,14 +205,23 @@ pub fn run() -> Result<()> {
                     }
                     ReturnData::None
                 }
-                LayerShellEvent::RequestMessages(DispatchMessage::MouseButton { .. }) => {
-                    let (x, y) = state.last_pointer;
-                    let local_x = (x - SURFACE_PADDING) / state.scale as i32;
-                    let local_y = (y - SURFACE_PADDING) / state.scale as i32;
-                    if state.sheet.manifest().is_body_zone(local_x, local_y) {
-                        state.brain.poke(state.started.elapsed().as_millis() as u64);
+                LayerShellEvent::RequestMessages(DispatchMessage::MouseButton {
+                    state: button_state,
+                    button,
+                    ..
+                }) => {
+                    if *button == LEFT_BUTTON {
+                        match button_state {
+                            ::wayland_client::WEnum::Value(
+                                ::wayland_client::protocol::wl_pointer::ButtonState::Pressed,
+                            ) => state.start_drag_if_body(),
+                            ::wayland_client::WEnum::Value(
+                                ::wayland_client::protocol::wl_pointer::ButtonState::Released,
+                            ) => state.finish_drag_or_poke(),
+                            _ => {}
+                        }
+                        event_loop.request_refresh_all(RefreshRequest::NextFrame);
                     }
-                    event_loop.request_refresh_all(RefreshRequest::NextFrame);
                     ReturnData::None
                 }
                 _ => ReturnData::None,
@@ -222,6 +240,13 @@ struct SharedBuffer {
     height: u32,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DragState {
+    offset_x: i32,
+    offset_y: i32,
+    moved: bool,
+}
+
 struct LayerState {
     sheet: SpriteSheet,
     brain: PetBrain,
@@ -231,6 +256,7 @@ struct LayerState {
     scale: u32,
     last_pointer: (i32, i32),
     quit: bool,
+    drag: Option<DragState>,
     buffers: Vec<SharedBuffer>,
     buffer_cursor: usize,
     bounds: Bounds,
@@ -258,6 +284,51 @@ impl LayerState {
     fn apply_margin<T>(&self, unit: &WindowStateUnit<T>) {
         let snapshot = self.brain.snapshot();
         unit.set_margin((snapshot.y.max(0), 0, 0, snapshot.x.max(0)));
+    }
+
+    fn start_drag_if_body(&mut self) {
+        let (x, y) = self.last_pointer;
+        let local_x = (x - SURFACE_PADDING) / self.scale as i32;
+        let local_y = (y - SURFACE_PADDING) / self.scale as i32;
+        if self.sheet.manifest().is_body_zone(local_x, local_y) {
+            self.brain.begin_drag(self.now_ms());
+            self.drag = Some(DragState {
+                offset_x: x,
+                offset_y: y,
+                moved: false,
+            });
+        }
+    }
+
+    fn drag_to_pointer(&mut self, x: i32, y: i32) -> bool {
+        let Some(drag) = self.drag else {
+            return false;
+        };
+
+        let snapshot = self.brain.snapshot();
+        let target_x = snapshot.x + x - drag.offset_x;
+        let target_y = snapshot.y + y - drag.offset_y;
+        let dx = target_x - snapshot.x;
+        let dy = target_y - snapshot.y;
+
+        if let Some(drag) = &mut self.drag {
+            drag.moved |= dx.abs() >= DRAG_THRESHOLD_PX || dy.abs() >= DRAG_THRESHOLD_PX;
+        }
+        self.brain.set_position(target_x, target_y, self.bounds);
+        true
+    }
+
+    fn finish_drag_or_poke(&mut self) {
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+
+        let now_ms = self.now_ms();
+        if drag.moved {
+            self.brain.knockdown(now_ms);
+        } else {
+            self.brain.poke(now_ms);
+        }
     }
 
     fn apply_output_hint(&mut self, debug_text: &str) {

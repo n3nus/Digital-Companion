@@ -9,6 +9,7 @@ const AMBIENT_MAX_MS: u64 = 13_000;
 const WALK_MIN_MS: u64 = 3_500;
 const WALK_MAX_MS: u64 = 7_000;
 const WALK_VELOCITY_PX_PER_SEC: i32 = 58;
+const KNOCKDOWN_DURATION_MS: u64 = 2_500;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -167,6 +168,17 @@ impl PetBrain {
         self.snapshot.y = bounds.clamp_y(bounds.height - bounds.pet_size - 24);
     }
 
+    pub fn set_position(&mut self, x: i32, y: i32, bounds: Bounds) {
+        self.snapshot.x = bounds.clamp_x(x);
+        self.snapshot.y = bounds.clamp_y(y);
+    }
+
+    pub fn begin_drag(&mut self, now_ms: u64) {
+        self.set_animation(AnimationId::Idle, now_ms);
+        self.snapshot.mood = PetMood::Calm;
+        self.action_until_ms = now_ms + 30_000;
+    }
+
     pub fn tick(&mut self, now_ms: u64, bounds: Bounds) {
         let dt_ms = self
             .last_tick_ms
@@ -234,11 +246,15 @@ impl PetBrain {
         if now_ms < self.poke_cooldown_until_ms {
             return false;
         }
-        self.set_animation(AnimationId::Poke, now_ms);
-        self.snapshot.mood = PetMood::Happy;
-        self.action_until_ms = now_ms + 900;
+        self.knockdown(now_ms);
         self.poke_cooldown_until_ms = now_ms + 1_200;
         true
+    }
+
+    pub fn knockdown(&mut self, now_ms: u64) {
+        self.set_animation(AnimationId::Poke, now_ms);
+        self.snapshot.mood = PetMood::Calm;
+        self.action_until_ms = now_ms + KNOCKDOWN_DURATION_MS;
     }
 
     pub fn stroke(&mut self, now_ms: u64, manifest: &AssetManifest) -> usize {
@@ -552,6 +568,45 @@ mod tests {
         assert!(brain.poke(100));
         assert!(!brain.poke(200));
         assert!(brain.particles().is_empty());
+    }
+
+    #[test]
+    fn poke_keeps_knockdown_visible_long_enough() {
+        let mut brain = PetBrain::new(2);
+        assert!(brain.poke(100));
+        assert_eq!(brain.snapshot().animation, AnimationId::Poke);
+        assert_eq!(brain.action_until_ms, 100 + KNOCKDOWN_DURATION_MS);
+    }
+
+    #[test]
+    fn set_position_clamps_to_bounds() {
+        let mut brain = PetBrain::new(4);
+        let bounds = Bounds {
+            width: 300,
+            height: 260,
+            pet_size: 100,
+        };
+        brain.set_position(999, -10, bounds);
+        let snapshot = brain.snapshot();
+        assert_eq!(snapshot.x, 200);
+        assert_eq!(snapshot.y, 0);
+    }
+
+    #[test]
+    fn begin_drag_stops_current_walk() {
+        let mut brain = PetBrain::new(5);
+        brain.next_ambient_ms = 1;
+        let bounds = Bounds {
+            width: 800,
+            height: 600,
+            pet_size: 144,
+        };
+        brain.tick(1, bounds);
+        assert!(brain.is_walking());
+
+        brain.begin_drag(100);
+        assert_eq!(brain.snapshot().animation, AnimationId::Idle);
+        assert!(!brain.is_walking());
     }
 
     #[test]

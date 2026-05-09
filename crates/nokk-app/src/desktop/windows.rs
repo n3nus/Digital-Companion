@@ -1,4 +1,4 @@
-use std::ffi::{c_void, OsStr};
+use std::ffi::{OsStr, c_void};
 use std::iter::once;
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::OsStrExt;
@@ -7,12 +7,11 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use nokk_core::{AppConfig, Bounds, GestureEvent, GestureTracker, PetBrain, SpriteSheet, Surface};
-use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
-    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, HBITMAP,
-    HGDIOBJ, SelectObject,
+    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, HBITMAP, HGDIOBJ,
+    SelectObject,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
@@ -20,14 +19,15 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-    DestroyMenu, DispatchMessageW, GWLP_USERDATA, GetCursorPos, GetMessageW, IDC_ARROW,
-    IDI_APPLICATION, LoadCursorW, LoadIconW, MSG, PostQuitMessage, RegisterClassW, SW_SHOW,
-    SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_RIGHTBUTTON,
-    TrackPopupMenu, TranslateMessage, UpdateLayeredWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND,
-    WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, GetWindowLongPtrW, ULW_ALPHA,
-    MF_STRING,
+    DestroyMenu, DispatchMessageW, GWLP_USERDATA, GetCursorPos, GetMessageW, GetWindowLongPtrW,
+    IDC_ARROW, IDI_APPLICATION, LoadCursorW, LoadIconW, MF_STRING, MSG, PostQuitMessage,
+    RegisterClassW, ReleaseCapture, SW_SHOW, SetCapture, SetForegroundWindow, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
+    ULW_ALPHA, UpdateLayeredWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CREATE,
+    WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
+use windows::core::{PCWSTR, w};
 
 use crate::app_assets;
 
@@ -37,6 +37,7 @@ const MENU_PAUSE: usize = 1001;
 const MENU_RESET: usize = 1002;
 const MENU_QUIT: usize = 1003;
 const SURFACE_PADDING: i32 = 18;
+const DRAG_THRESHOLD_PX: i32 = 4;
 
 pub fn run() -> Result<()> {
     let sheet = app_assets::load_sprites()?;
@@ -65,6 +66,7 @@ pub fn run() -> Result<()> {
         surface_size,
         bounds,
         last_pointer: (0, 0),
+        drag: None,
     });
 
     unsafe { run_native(app).context("run native Windows overlay") }
@@ -79,6 +81,14 @@ struct WinApp {
     surface_size: i32,
     bounds: Bounds,
     last_pointer: (i32, i32),
+    drag: Option<DragState>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DragState {
+    offset_x: i32,
+    offset_y: i32,
+    moved: bool,
 }
 
 impl WinApp {
@@ -103,11 +113,61 @@ impl WinApp {
         .save();
     }
 
+    fn start_drag_if_body(&mut self) -> bool {
+        let (x, y) = self.last_pointer;
+        let local_x = (x - SURFACE_PADDING) / self.scale as i32;
+        let local_y = (y - SURFACE_PADDING) / self.scale as i32;
+        if self.sheet.manifest().is_body_zone(local_x, local_y) {
+            self.brain.begin_drag(self.now_ms());
+            self.drag = Some(DragState {
+                offset_x: x,
+                offset_y: y,
+                moved: false,
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    fn drag_to_pointer(&mut self, x: i32, y: i32) -> bool {
+        let Some(drag) = self.drag else {
+            return false;
+        };
+
+        let snapshot = self.brain.snapshot();
+        let target_x = snapshot.x + x - drag.offset_x;
+        let target_y = snapshot.y + y - drag.offset_y;
+        let dx = target_x - snapshot.x;
+        let dy = target_y - snapshot.y;
+
+        if let Some(drag) = &mut self.drag {
+            drag.moved |= dx.abs() >= DRAG_THRESHOLD_PX || dy.abs() >= DRAG_THRESHOLD_PX;
+        }
+        self.brain.set_position(target_x, target_y, self.bounds);
+        true
+    }
+
+    fn finish_drag_or_poke(&mut self) {
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+
+        let now_ms = self.now_ms();
+        if drag.moved {
+            self.brain.knockdown(now_ms);
+        } else {
+            self.brain.poke(now_ms);
+        }
+    }
+
     fn render_surface(&mut self) -> Surface {
         self.tick();
         let mut surface = Surface::new(self.surface_size as u32, self.surface_size as u32);
         let snapshot = self.brain.snapshot();
-        let frame = self.brain.current_frame(self.sheet.manifest(), self.now_ms());
+        let frame = self
+            .brain
+            .current_frame(self.sheet.manifest(), self.now_ms());
         surface.blit_frame(
             &self.sheet,
             frame,
@@ -160,10 +220,8 @@ unsafe fn run_native(app: Box<WinApp>) -> Result<()> {
         Some(instance),
         Some(raw.cast::<c_void>() as *const c_void),
     )
-    .inspect_err(|_| {
-        unsafe {
-            let _ = Box::from_raw(raw);
-        }
+    .inspect_err(|_| unsafe {
+        let _ = Box::from_raw(raw);
     })?;
 
     ShowWindow(hwnd, SW_SHOW);
@@ -206,6 +264,11 @@ unsafe extern "system" fn window_proc(
                 let x = low_word(lparam.0 as u32) as i32;
                 let y = high_word(lparam.0 as u32) as i32;
                 (*app).last_pointer = (x, y);
+                if (*app).drag_to_pointer(x, y) {
+                    render_layered(hwnd, &mut *app);
+                    return LRESULT(0);
+                }
+
                 let local_x = (x - SURFACE_PADDING) / (*app).scale as i32;
                 let local_y = (y - SURFACE_PADDING) / (*app).scale as i32;
                 if (*app).gesture.pointer_moved(
@@ -215,7 +278,9 @@ unsafe extern "system" fn window_proc(
                     (*app).sheet.manifest(),
                 ) == Some(GestureEvent::Stroked)
                 {
-                    (*app).brain.stroke((*app).now_ms(), (*app).sheet.manifest());
+                    (*app)
+                        .brain
+                        .stroke((*app).now_ms(), (*app).sheet.manifest());
                     render_layered(hwnd, &mut *app);
                 }
             }
@@ -223,13 +288,20 @@ unsafe extern "system" fn window_proc(
         }
         WM_LBUTTONDOWN => {
             if !app.is_null() {
-                let (x, y) = (*app).last_pointer;
-                let local_x = (x - SURFACE_PADDING) / (*app).scale as i32;
-                let local_y = (y - SURFACE_PADDING) / (*app).scale as i32;
-                if (*app).sheet.manifest().is_body_zone(local_x, local_y) {
-                    (*app).brain.poke((*app).now_ms());
-                    render_layered(hwnd, &mut *app);
+                let x = low_word(lparam.0 as u32) as i32;
+                let y = high_word(lparam.0 as u32) as i32;
+                (*app).last_pointer = (x, y);
+                if (*app).start_drag_if_body() {
+                    SetCapture(hwnd);
                 }
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            if !app.is_null() {
+                (*app).finish_drag_or_poke();
+                ReleaseCapture();
+                render_layered(hwnd, &mut *app);
             }
             LRESULT(0)
         }
