@@ -1,0 +1,32 @@
+[package]
+name = "nokk"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow = "1"
+crossterm = "0.29"
+nokk-core = { path = "../nokk-core" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = "0.3"
+layershellev = "0.17.1"
+memmap2 = "0.9"
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "time"] }
+wayland-client = "0.31"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[[bin]]
+name = "nokk"
+path = "src/main.rs"
