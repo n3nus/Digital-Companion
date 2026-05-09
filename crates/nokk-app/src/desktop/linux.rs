@@ -184,6 +184,11 @@ pub fn run() -> Result<()> {
                     state.last_pointer = (x, y);
 
                     if state.drag_to_pointer(x, y) {
+                        if let Some(index) = index {
+                            if let Some(unit) = event_loop.get_unit_with_id(index) {
+                                state.apply_margin(unit);
+                            }
+                        }
                         event_loop.request_refresh_all(RefreshRequest::NextFrame);
                         return ReturnData::None;
                     }

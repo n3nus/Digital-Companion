@@ -86,8 +86,10 @@ struct WinApp {
 
 #[derive(Clone, Copy, Debug)]
 struct DragState {
-    offset_x: i32,
-    offset_y: i32,
+    screen_offset_x: i32,
+    screen_offset_y: i32,
+    last_screen_x: i32,
+    last_screen_y: i32,
     moved: bool,
 }
 
@@ -113,15 +115,18 @@ impl WinApp {
         .save();
     }
 
-    fn start_drag_if_body(&mut self) -> bool {
+    fn start_drag_if_body(&mut self, screen_x: i32, screen_y: i32) -> bool {
         let (x, y) = self.last_pointer;
         let local_x = (x - SURFACE_PADDING) / self.scale as i32;
         let local_y = (y - SURFACE_PADDING) / self.scale as i32;
         if self.sheet.manifest().is_body_zone(local_x, local_y) {
+            let snapshot = self.brain.snapshot();
             self.brain.begin_drag(self.now_ms());
             self.drag = Some(DragState {
-                offset_x: x,
-                offset_y: y,
+                screen_offset_x: screen_x - snapshot.x,
+                screen_offset_y: screen_y - snapshot.y,
+                last_screen_x: screen_x,
+                last_screen_y: screen_y,
                 moved: false,
             });
             true
@@ -130,19 +135,20 @@ impl WinApp {
         }
     }
 
-    fn drag_to_pointer(&mut self, x: i32, y: i32) -> bool {
+    fn drag_to_pointer(&mut self, screen_x: i32, screen_y: i32) -> bool {
         let Some(drag) = self.drag else {
             return false;
         };
 
-        let snapshot = self.brain.snapshot();
-        let target_x = snapshot.x + x - drag.offset_x;
-        let target_y = snapshot.y + y - drag.offset_y;
-        let dx = target_x - snapshot.x;
-        let dy = target_y - snapshot.y;
+        let target_x = screen_x - drag.screen_offset_x;
+        let target_y = screen_y - drag.screen_offset_y;
+        let dx = screen_x - drag.last_screen_x;
+        let dy = screen_y - drag.last_screen_y;
 
         if let Some(drag) = &mut self.drag {
             drag.moved |= dx.abs() >= DRAG_THRESHOLD_PX || dy.abs() >= DRAG_THRESHOLD_PX;
+            drag.last_screen_x = screen_x;
+            drag.last_screen_y = screen_y;
         }
         self.brain.set_position(target_x, target_y, self.bounds);
         true
@@ -264,7 +270,14 @@ unsafe extern "system" fn window_proc(
                 let x = low_word(lparam.0 as u32) as i32;
                 let y = high_word(lparam.0 as u32) as i32;
                 (*app).last_pointer = (x, y);
-                if (*app).drag_to_pointer(x, y) {
+                if let Some(point) = cursor_position() {
+                    if (*app).drag_to_pointer(point.x, point.y) {
+                        render_layered(hwnd, &mut *app);
+                        return LRESULT(0);
+                    }
+                }
+
+                if (*app).drag.is_some() {
                     render_layered(hwnd, &mut *app);
                     return LRESULT(0);
                 }
@@ -291,8 +304,10 @@ unsafe extern "system" fn window_proc(
                 let x = low_word(lparam.0 as u32) as i32;
                 let y = high_word(lparam.0 as u32) as i32;
                 (*app).last_pointer = (x, y);
-                if (*app).start_drag_if_body() {
-                    SetCapture(hwnd);
+                if let Some(point) = cursor_position() {
+                    if (*app).start_drag_if_body(point.x, point.y) {
+                        SetCapture(hwnd);
+                    }
                 }
             }
             LRESULT(0)
@@ -464,6 +479,17 @@ unsafe fn show_tray_menu(hwnd: HWND) {
     SetForegroundWindow(hwnd);
     TrackPopupMenu(menu, TPM_RIGHTBUTTON, point.x, point.y, None, hwnd, None);
     let _ = DestroyMenu(menu);
+}
+
+fn cursor_position() -> Option<POINT> {
+    let mut point = POINT::default();
+    unsafe {
+        if GetCursorPos(&mut point).is_ok() {
+            Some(point)
+        } else {
+            None
+        }
+    }
 }
 
 fn write_tip(dst: &mut [u16], tip: &str) {
