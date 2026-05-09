@@ -1,6 +1,7 @@
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::os::fd::AsFd;
+use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -73,6 +74,7 @@ pub fn run() -> Result<()> {
             height: DEFAULT_MONITOR_HEIGHT,
             pet_size,
         },
+        output_origin: (0, 0),
     };
 
     let event_loop: WindowState<()> = WindowState::new("Nøkk")
@@ -103,8 +105,10 @@ pub fn run() -> Result<()> {
                     if let Some(index) = index {
                         if let Some(unit) = event_loop.get_unit_with_id(index) {
                             if let Some(info) = unit.get_xdgoutput_info() {
-                                let text = format!("{info:?}");
-                                state.apply_output_hint(&text);
+                                state.apply_output_info(
+                                    info.get_logical_size(),
+                                    info.get_position(),
+                                );
                             }
                             state.apply_margin(unit);
                         }
@@ -148,6 +152,12 @@ pub fn run() -> Result<()> {
                     ReturnData::WlBuffer(buffer)
                 }
                 LayerShellEvent::NormalDispatch => {
+                    if state.drag_to_current_cursor() {
+                        for unit in event_loop.get_unit_iter() {
+                            state.apply_margin(unit);
+                        }
+                        event_loop.request_refresh_all(RefreshRequest::NextFrame);
+                    }
                     event_loop.request_refresh_all(RefreshRequest::At(
                         Instant::now() + Duration::from_millis(FRAME_INTERVAL_MS),
                     ));
@@ -247,8 +257,11 @@ struct SharedBuffer {
 
 #[derive(Clone, Copy, Debug)]
 struct DragState {
-    offset_x: i32,
-    offset_y: i32,
+    cursor_offset_x: i32,
+    cursor_offset_y: i32,
+    last_cursor_x: i32,
+    last_cursor_y: i32,
+    uses_global_cursor: bool,
     moved: bool,
 }
 
@@ -265,6 +278,7 @@ struct LayerState {
     buffers: Vec<SharedBuffer>,
     buffer_cursor: usize,
     bounds: Bounds,
+    output_origin: (i32, i32),
 }
 
 impl LayerState {
@@ -296,10 +310,21 @@ impl LayerState {
         let local_x = (x - SURFACE_PADDING) / self.scale as i32;
         let local_y = (y - SURFACE_PADDING) / self.scale as i32;
         if self.sheet.manifest().is_body_zone(local_x, local_y) {
+            let snapshot = self.brain.snapshot();
+            let (cursor_x, cursor_y, uses_global_cursor) =
+                if let Some((cursor_x, cursor_y)) = self.hyprland_cursor_position() {
+                    (cursor_x, cursor_y, true)
+                } else {
+                    (snapshot.x + x, snapshot.y + y, false)
+                };
+
             self.brain.begin_drag(self.now_ms());
             self.drag = Some(DragState {
-                offset_x: x,
-                offset_y: y,
+                cursor_offset_x: cursor_x - snapshot.x,
+                cursor_offset_y: cursor_y - snapshot.y,
+                last_cursor_x: cursor_x,
+                last_cursor_y: cursor_y,
+                uses_global_cursor,
                 moved: false,
             });
         }
@@ -310,17 +335,53 @@ impl LayerState {
             return false;
         };
 
-        let snapshot = self.brain.snapshot();
-        let target_x = snapshot.x + x - drag.offset_x;
-        let target_y = snapshot.y + y - drag.offset_y;
-        let dx = target_x - snapshot.x;
-        let dy = target_y - snapshot.y;
+        let Some((cursor_x, cursor_y)) = self.drag_cursor_position(&drag, x, y) else {
+            return true;
+        };
 
+        let target_x = cursor_x - drag.cursor_offset_x;
+        let target_y = cursor_y - drag.cursor_offset_y;
+        let dx = cursor_x - drag.last_cursor_x;
+        let dy = cursor_y - drag.last_cursor_y;
+
+        self.update_drag_position(cursor_x, cursor_y, target_x, target_y, dx, dy);
+        true
+    }
+
+    fn drag_to_current_cursor(&mut self) -> bool {
+        let Some(drag) = self.drag else {
+            return false;
+        };
+        if !drag.uses_global_cursor {
+            return false;
+        }
+
+        let Some((cursor_x, cursor_y)) = self.hyprland_cursor_position() else {
+            return false;
+        };
+        let target_x = cursor_x - drag.cursor_offset_x;
+        let target_y = cursor_y - drag.cursor_offset_y;
+        let dx = cursor_x - drag.last_cursor_x;
+        let dy = cursor_y - drag.last_cursor_y;
+        self.update_drag_position(cursor_x, cursor_y, target_x, target_y, dx, dy);
+        true
+    }
+
+    fn update_drag_position(
+        &mut self,
+        cursor_x: i32,
+        cursor_y: i32,
+        target_x: i32,
+        target_y: i32,
+        dx: i32,
+        dy: i32,
+    ) {
         if let Some(drag) = &mut self.drag {
             drag.moved |= dx.abs() >= DRAG_THRESHOLD_PX || dy.abs() >= DRAG_THRESHOLD_PX;
+            drag.last_cursor_x = cursor_x;
+            drag.last_cursor_y = cursor_y;
         }
         self.brain.set_position(target_x, target_y, self.bounds);
-        true
     }
 
     fn finish_drag_or_poke(&mut self) {
@@ -330,28 +391,44 @@ impl LayerState {
 
         let now_ms = self.now_ms();
         if drag.moved {
+            if drag.uses_global_cursor {
+                if let Some((cursor_x, cursor_y)) = self.hyprland_cursor_position() {
+                    self.brain.set_position(
+                        cursor_x - drag.cursor_offset_x,
+                        cursor_y - drag.cursor_offset_y,
+                        self.bounds,
+                    );
+                }
+            }
             self.brain.knockdown(now_ms);
         } else {
             self.brain.poke(now_ms);
         }
     }
 
-    fn apply_output_hint(&mut self, debug_text: &str) {
-        let Some(size_start) = debug_text.find("logical_size: Some((") else {
-            return;
-        };
-        let rest = &debug_text[size_start + "logical_size: Some((".len()..];
-        let Some(size_end) = rest.find("))") else {
-            return;
-        };
-        let pair = &rest[..size_end];
-        let mut parts = pair.split(',').map(str::trim);
-        if let (Some(width), Some(height)) = (parts.next(), parts.next()) {
-            if let (Ok(width), Ok(height)) = (width.parse::<i32>(), height.parse::<i32>()) {
-                self.bounds.width = width.max(self.bounds.pet_size);
-                self.bounds.height = height.max(self.bounds.pet_size);
-            }
+    fn drag_cursor_position(&self, drag: &DragState, x: i32, y: i32) -> Option<(i32, i32)> {
+        if drag.uses_global_cursor {
+            return self
+                .hyprland_cursor_position()
+                .or(Some((drag.last_cursor_x, drag.last_cursor_y)));
         }
+
+        let snapshot = self.brain.snapshot();
+        Some((snapshot.x + x, snapshot.y + y))
+    }
+
+    fn hyprland_cursor_position(&self) -> Option<(i32, i32)> {
+        hyprland_cursor_position()
+            .map(|(x, y)| (x - self.output_origin.0, y - self.output_origin.1))
+    }
+
+    fn apply_output_info(&mut self, size: (i32, i32), position: (i32, i32)) {
+        let (width, height) = size;
+        if width > 0 && height > 0 {
+            self.bounds.width = width.max(self.bounds.pet_size);
+            self.bounds.height = height.max(self.bounds.pet_size);
+        }
+        self.output_origin = position;
     }
 
     fn recreate_buffers(
@@ -592,6 +669,30 @@ impl ksni::Tray for LinuxTray {
             .into(),
         ]
     }
+}
+
+fn hyprland_cursor_position() -> Option<(i32, i32)> {
+    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")?;
+    let signature = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")?;
+    let socket_path = std::path::PathBuf::from(runtime_dir)
+        .join("hypr")
+        .join(signature)
+        .join(".socket.sock");
+
+    let mut stream = UnixStream::connect(socket_path).ok()?;
+    let timeout = Some(Duration::from_millis(12));
+    let _ = stream.set_read_timeout(timeout);
+    let _ = stream.set_write_timeout(timeout);
+    stream.write_all(b"cursorpos").ok()?;
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    parse_cursor_position(&response)
+}
+
+fn parse_cursor_position(input: &str) -> Option<(i32, i32)> {
+    let (x, y) = input.trim().split_once(',')?;
+    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
 }
 
 fn tray_icon() -> ksni::Icon {
