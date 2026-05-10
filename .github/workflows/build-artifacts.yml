@@ -1,0 +1,72 @@
+name: Build app artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release -p nokk --bin nokk --bin nokk-console
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist
+          Copy-Item target\release\nokk.exe dist\nokk.exe
+          Copy-Item target\release\nokk-console.exe dist\nokk-console.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nokk-windows-x64
+          path: dist/*
+
+  linux:
+    name: Linux x64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev
+      - name: Build
+        run: cargo build --release -p nokk --bin nokk --bin nokk-console
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist/nokk-linux-x64/bin dist/nokk-linux-x64/packaging/linux dist/nokk-linux-x64/assets/nokk dist/nokk-linux-x64/tools
+          cp target/release/nokk dist/nokk-linux-x64/bin/nokk
+          cp target/release/nokk-console dist/nokk-linux-x64/bin/nokk-console
+          cp packaging/linux/dev.n3n.Nokk.desktop.in dist/nokk-linux-x64/packaging/linux/
+          cp assets/nokk/preview.png dist/nokk-linux-x64/assets/nokk/
+          cp tools/install_linux_user.sh dist/nokk-linux-x64/tools/
+          tar -C dist -czf dist/nokk-linux-x64.tar.gz nokk-linux-x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nokk-linux-x64
+          path: dist/nokk-linux-x64.tar.gz
+
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release/nokk.exe
+            release/nokk-console.exe
+            release/nokk-linux-x64.tar.gz

@@ -43,3 +43,33 @@ cargo test
 cargo run -p nokk -- console
 cargo run -p nokk -- desktop
 ```
+
+## App Builds
+
+Linux local install without keeping a terminal open:
+
+```bash
+sh tools/install_linux_user.sh
+```
+
+This installs `nokk` into `~/.local/bin` and adds a desktop launcher with
+`Terminal=false`.
+
+Windows GUI exe:
+
+```powershell
+cargo build --release -p nokk --bin nokk
+```
+
+The result is `target\release\nokk.exe`. Release builds on Windows use the GUI
+subsystem, so double-clicking the exe does not open a console window. For the
+terminal companion, build or run `nokk-console` separately.
+
+GitHub can build the downloadable artifacts for you through the
+`Build app artifacts` workflow. Run it manually from the Actions tab for
+temporary build artifacts, or push a tag such as `v0.1.0` to create a GitHub
+Release with direct downloads:
+
+- `nokk.exe`
+- `nokk-console.exe`
+- `nokk-linux-x64.tar.gz`

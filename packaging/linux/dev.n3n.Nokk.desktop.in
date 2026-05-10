@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Nøkk
+GenericName=Digital Pet Companion
+Comment=Tiny desktop companion
+Exec=@BINDIR@/nokk desktop
+Icon=@ICON@
+Terminal=false
+Categories=Utility;Game;
+StartupNotify=false

@@ -5,4 +5,6 @@
 .codex
 __pycache__/
 *.pyc
-
+/assets/nokk/pose-guides/
+/docs/pose-guide-generation.md
+/tools/generate_pose_guides.py
