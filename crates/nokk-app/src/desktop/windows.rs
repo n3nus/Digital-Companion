@@ -14,6 +14,7 @@ use windows::Win32::Graphics::Gdi::{
     SelectObject,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
@@ -21,11 +22,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
     DestroyMenu, DispatchMessageW, GWLP_USERDATA, GetCursorPos, GetMessageW, GetWindowLongPtrW,
     IDC_ARROW, IDI_APPLICATION, LoadCursorW, LoadIconW, MF_STRING, MSG, PostQuitMessage,
-    RegisterClassW, ReleaseCapture, SW_SHOW, SetCapture, SetForegroundWindow, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
-    ULW_ALPHA, UpdateLayeredWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CREATE,
-    WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    RegisterClassW, SW_SHOW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, ULW_ALPHA, UpdateLayeredWindow,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -232,7 +233,7 @@ unsafe fn run_native(app: Box<WinApp>) -> Result<()> {
 
     ShowWindow(hwnd, SW_SHOW);
     add_tray(hwnd)?;
-    SetTimer(hwnd, TIMER_ID, 33, None);
+    SetTimer(Some(hwnd), TIMER_ID, 33, None);
 
     let mut msg = MSG::default();
     while GetMessageW(&mut msg, None, 0, 0).into() {
@@ -363,7 +364,7 @@ unsafe fn render_layered(hwnd: HWND, app: &mut WinApp) {
     }
 
     let mem_dc = CreateCompatibleDC(None);
-    if mem_dc.0 == 0 {
+    if mem_dc.0 == null_mut() {
         return;
     }
 
@@ -392,7 +393,7 @@ unsafe fn render_layered(hwnd: HWND, app: &mut WinApp) {
         DeleteDC(mem_dc);
         return;
     };
-    if bitmap == HBITMAP(0) || bits.is_null() {
+    if bitmap == HBITMAP(null_mut()) || bits.is_null() {
         DeleteDC(mem_dc);
         return;
     }
@@ -413,7 +414,7 @@ unsafe fn render_layered(hwnd: HWND, app: &mut WinApp) {
         BlendOp: AC_SRC_OVER as u8,
         BlendFlags: 0,
         SourceConstantAlpha: 255,
-        AlphaFormat: AC_SRC_ALPHA,
+        AlphaFormat: AC_SRC_ALPHA as u8,
     };
 
     let _ = UpdateLayeredWindow(
