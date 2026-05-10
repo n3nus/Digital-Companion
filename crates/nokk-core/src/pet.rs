@@ -4,10 +4,20 @@ use crate::assets::{AnimationId, AssetManifest};
 
 const FIRST_AMBIENT_MIN_MS: u64 = 1_200;
 const FIRST_AMBIENT_MAX_MS: u64 = 2_800;
-const AMBIENT_MIN_MS: u64 = 5_000;
-const AMBIENT_MAX_MS: u64 = 13_000;
+const AMBIENT_MIN_MS: u64 = 12_000;
+const AMBIENT_MAX_MS: u64 = 32_000;
 const WALK_MIN_MS: u64 = 3_500;
 const WALK_MAX_MS: u64 = 7_000;
+const IDLE_MIN_MS: u64 = 8_000;
+const IDLE_MAX_MS: u64 = 18_000;
+const SIT_MIN_MS: u64 = 22_000;
+const SIT_MAX_MS: u64 = 48_000;
+const BLINK_MIN_MS: u64 = 900;
+const BLINK_MAX_MS: u64 = 1_500;
+const DANCE_MIN_MS: u64 = 3_600;
+const DANCE_MAX_MS: u64 = 6_400;
+const SLEEP_MIN_MS: u64 = 65_000;
+const SLEEP_MAX_MS: u64 = 145_000;
 const WALK_VELOCITY_PX_PER_SEC: i32 = 58;
 const KNOCKDOWN_DURATION_MS: u64 = 2_500;
 
@@ -293,11 +303,31 @@ impl PetBrain {
                     PetMood::Calm,
                 )
             }
-            32..=55 => (AnimationId::Idle, 2_000, PetMood::Calm),
-            56..=73 => (AnimationId::Sit, 4_500, PetMood::Calm),
-            74..=86 => (AnimationId::Blink, 700, PetMood::Calm),
-            87..=94 => (AnimationId::Dance, 2_800, PetMood::Happy),
-            _ => (AnimationId::Sleep, 6_500, PetMood::Sleepy),
+            32..=55 => (
+                AnimationId::Idle,
+                self.rng.range(IDLE_MIN_MS, IDLE_MAX_MS),
+                PetMood::Calm,
+            ),
+            56..=73 => (
+                AnimationId::Sit,
+                self.rng.range(SIT_MIN_MS, SIT_MAX_MS),
+                PetMood::Calm,
+            ),
+            74..=86 => (
+                AnimationId::Blink,
+                self.rng.range(BLINK_MIN_MS, BLINK_MAX_MS),
+                PetMood::Calm,
+            ),
+            87..=94 => (
+                AnimationId::Dance,
+                self.rng.range(DANCE_MIN_MS, DANCE_MAX_MS),
+                PetMood::Happy,
+            ),
+            _ => (
+                AnimationId::Sleep,
+                self.rng.range(SLEEP_MIN_MS, SLEEP_MAX_MS),
+                PetMood::Sleepy,
+            ),
         };
 
         self.set_animation(animation, now_ms);
@@ -616,5 +646,45 @@ mod tests {
         assert!((3..=5).contains(&count));
         assert_eq!(brain.particles().len(), count);
         assert_eq!(brain.snapshot().animation, AnimationId::Happy);
+    }
+
+    #[test]
+    fn quiet_ambient_actions_linger() {
+        let bounds = Bounds {
+            width: 800,
+            height: 600,
+            pet_size: 144,
+        };
+        let mut saw_idle = false;
+        let mut saw_sit = false;
+        let mut saw_sleep = false;
+
+        for seed in 1..2_000 {
+            let mut brain = PetBrain::new(seed);
+            brain.first_ambient = false;
+            brain.next_ambient_ms = 1;
+            brain.tick(1, bounds);
+            let duration = brain.action_until_ms.saturating_sub(1);
+
+            match brain.snapshot().animation {
+                AnimationId::Idle => {
+                    saw_idle = true;
+                    assert!((IDLE_MIN_MS..IDLE_MAX_MS).contains(&duration));
+                }
+                AnimationId::Sit => {
+                    saw_sit = true;
+                    assert!((SIT_MIN_MS..SIT_MAX_MS).contains(&duration));
+                }
+                AnimationId::Sleep => {
+                    saw_sleep = true;
+                    assert!((SLEEP_MIN_MS..SLEEP_MAX_MS).contains(&duration));
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_idle);
+        assert!(saw_sit);
+        assert!(saw_sleep);
     }
 }
