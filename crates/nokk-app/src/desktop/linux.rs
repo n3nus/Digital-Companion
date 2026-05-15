@@ -69,11 +69,7 @@ pub fn run() -> Result<()> {
         drag: None,
         buffers: Vec::new(),
         buffer_cursor: 0,
-        bounds: Bounds {
-            width: DEFAULT_MONITOR_WIDTH,
-            height: DEFAULT_MONITOR_HEIGHT,
-            pet_size,
-        },
+        bounds: Bounds::new(DEFAULT_MONITOR_WIDTH, DEFAULT_MONITOR_HEIGHT, pet_size),
         output_origin: (0, 0),
     };
 

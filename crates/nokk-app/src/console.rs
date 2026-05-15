@@ -52,11 +52,11 @@ pub fn run() -> Result<()> {
 
         let now_ms = started.elapsed().as_millis() as u64;
         let (cols, rows) = terminal::size().unwrap_or((80, 24));
-        let bounds = Bounds {
-            width: i32::from(cols).max(20) * 8,
-            height: i32::from(rows).max(10) * 16,
-            pet_size: sheet.frame_size() as i32,
-        };
+        let bounds = Bounds::new(
+            i32::from(cols).max(20) * 8,
+            i32::from(rows).max(10) * 16,
+            sheet.frame_size() as i32,
+        );
         brain.tick(now_ms, bounds);
         draw_console(&mut terminal.stdout, &sheet, &brain, now_ms)?;
         std::thread::sleep(Duration::from_millis(80));

@@ -31,18 +31,44 @@ pub enum PetMood {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bounds {
+    pub left: i32,
+    pub top: i32,
     pub width: i32,
     pub height: i32,
     pub pet_size: i32,
 }
 
 impl Bounds {
+    pub fn new(width: i32, height: i32, pet_size: i32) -> Self {
+        Self::with_origin(0, 0, width, height, pet_size)
+    }
+
+    pub fn with_origin(left: i32, top: i32, width: i32, height: i32, pet_size: i32) -> Self {
+        Self {
+            left,
+            top,
+            width,
+            height,
+            pet_size,
+        }
+    }
+
+    fn max_x(&self) -> i32 {
+        self.left
+            .saturating_add((self.width - self.pet_size).max(0))
+    }
+
+    fn max_y(&self) -> i32 {
+        self.top
+            .saturating_add((self.height - self.pet_size).max(0))
+    }
+
     fn clamp_x(&self, x: i32) -> i32 {
-        x.clamp(0, (self.width - self.pet_size).max(0))
+        x.clamp(self.left, self.max_x())
     }
 
     fn clamp_y(&self, y: i32) -> i32 {
-        y.clamp(0, (self.height - self.pet_size).max(0))
+        y.clamp(self.top, self.max_y())
     }
 }
 
@@ -174,8 +200,8 @@ impl PetBrain {
     }
 
     pub fn reset_position(&mut self, bounds: Bounds) {
-        self.snapshot.x = bounds.clamp_x(24);
-        self.snapshot.y = bounds.clamp_y(bounds.height - bounds.pet_size - 24);
+        self.snapshot.x = bounds.clamp_x(bounds.left + 24);
+        self.snapshot.y = bounds.clamp_y(bounds.max_y() - 24);
     }
 
     pub fn set_position(&mut self, x: i32, y: i32, bounds: Bounds) {
@@ -235,13 +261,13 @@ impl PetBrain {
             self.snapshot.x += step * self.walk_dx;
             self.snapshot.y += step * self.walk_dy;
 
-            if self.snapshot.x <= 0 || self.snapshot.x >= bounds.width - bounds.pet_size {
+            if self.snapshot.x <= bounds.left || self.snapshot.x >= bounds.max_x() {
                 self.walk_dx *= -1;
                 self.snapshot.facing = self.walk_dx.signum();
                 self.snapshot.x = bounds.clamp_x(self.snapshot.x);
                 self.apply_walk_animation_for_direction(now_ms);
             }
-            if self.snapshot.y <= 0 || self.snapshot.y >= bounds.height - bounds.pet_size {
+            if self.snapshot.y <= bounds.top || self.snapshot.y >= bounds.max_y() {
                 self.walk_dy *= -1;
                 self.snapshot.y = bounds.clamp_y(self.snapshot.y);
                 self.apply_walk_animation_for_direction(now_ms);
@@ -267,7 +293,15 @@ impl PetBrain {
         self.action_until_ms = now_ms + KNOCKDOWN_DURATION_MS;
     }
 
+    pub fn is_knockdown_active(&self, now_ms: u64) -> bool {
+        self.snapshot.animation == AnimationId::Poke && now_ms < self.action_until_ms
+    }
+
     pub fn stroke(&mut self, now_ms: u64, manifest: &AssetManifest) -> usize {
+        if self.is_knockdown_active(now_ms) {
+            return 0;
+        }
+
         self.set_animation(AnimationId::Happy, now_ms);
         self.snapshot.mood = PetMood::Happy;
         self.action_until_ms = now_ms + 1_800;
@@ -553,11 +587,7 @@ mod tests {
     #[test]
     fn ambient_interval_stays_in_requested_range() {
         let mut brain = PetBrain::new(1);
-        let bounds = Bounds {
-            width: 800,
-            height: 600,
-            pet_size: 144,
-        };
+        let bounds = Bounds::new(800, 600, 144);
         brain.next_ambient_ms = 1;
         brain.tick(1, bounds);
         assert!(brain.next_ambient_ms >= AMBIENT_MIN_MS + 1);
@@ -577,11 +607,7 @@ mod tests {
         brain.snapshot.x = 220;
         brain.snapshot.y = 180;
         brain.next_ambient_ms = 1;
-        let bounds = Bounds {
-            width: 800,
-            height: 600,
-            pet_size: 144,
-        };
+        let bounds = Bounds::new(800, 600, 144);
 
         brain.tick(1, bounds);
         assert!(brain.is_walking());
@@ -609,13 +635,23 @@ mod tests {
     }
 
     #[test]
+    fn stroke_does_not_interrupt_active_knockdown() {
+        let mut brain = PetBrain::new(2);
+        brain.knockdown(100);
+
+        let count = brain.stroke(200, &manifest());
+
+        assert_eq!(count, 0);
+        assert!(brain.particles().is_empty());
+        assert_eq!(brain.snapshot().animation, AnimationId::Poke);
+        assert_eq!(brain.snapshot().mood, PetMood::Calm);
+        assert_eq!(brain.action_until_ms, 100 + KNOCKDOWN_DURATION_MS);
+    }
+
+    #[test]
     fn set_position_clamps_to_bounds() {
         let mut brain = PetBrain::new(4);
-        let bounds = Bounds {
-            width: 300,
-            height: 260,
-            pet_size: 100,
-        };
+        let bounds = Bounds::new(300, 260, 100);
         brain.set_position(999, -10, bounds);
         let snapshot = brain.snapshot();
         assert_eq!(snapshot.x, 200);
@@ -623,14 +659,20 @@ mod tests {
     }
 
     #[test]
+    fn set_position_clamps_to_bounds_origin() {
+        let mut brain = PetBrain::new(4);
+        let bounds = Bounds::with_origin(-1920, -120, 3840, 1200, 100);
+        brain.set_position(9999, -999, bounds);
+        let snapshot = brain.snapshot();
+        assert_eq!(snapshot.x, 1820);
+        assert_eq!(snapshot.y, -120);
+    }
+
+    #[test]
     fn begin_drag_stops_current_walk() {
         let mut brain = PetBrain::new(5);
         brain.next_ambient_ms = 1;
-        let bounds = Bounds {
-            width: 800,
-            height: 600,
-            pet_size: 144,
-        };
+        let bounds = Bounds::new(800, 600, 144);
         brain.tick(1, bounds);
         assert!(brain.is_walking());
 
@@ -650,11 +692,7 @@ mod tests {
 
     #[test]
     fn quiet_ambient_actions_linger() {
-        let bounds = Bounds {
-            width: 800,
-            height: 600,
-            pet_size: 144,
-        };
+        let bounds = Bounds::new(800, 600, 144);
         let mut saw_idle = false;
         let mut saw_sit = false;
         let mut saw_sleep = false;

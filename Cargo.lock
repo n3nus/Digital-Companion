@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "nokk"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "nokk-core"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "png",
  "ron",

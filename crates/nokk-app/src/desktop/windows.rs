@@ -10,8 +10,8 @@ use nokk_core::{AppConfig, Bounds, GestureEvent, GestureTracker, PetBrain, Sprit
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
-    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, HBITMAP, HGDIOBJ,
-    SelectObject,
+    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetMonitorInfoW,
+    HBITMAP, HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, SelectObject,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
@@ -20,13 +20,14 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-    DestroyMenu, DispatchMessageW, GWLP_USERDATA, GetCursorPos, GetMessageW, GetWindowLongPtrW,
-    IDC_ARROW, IDI_APPLICATION, LoadCursorW, LoadIconW, MF_STRING, MSG, PostQuitMessage,
-    RegisterClassW, SW_SHOW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    DestroyMenu, DispatchMessageW, GWLP_USERDATA, GetCursorPos, GetMessageW, GetSystemMetrics,
+    GetWindowLongPtrW, IDC_ARROW, IDI_APPLICATION, LoadCursorW, LoadIconW, MF_STRING, MSG,
+    PostQuitMessage, RegisterClassW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SW_SHOW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, ULW_ALPHA, UpdateLayeredWindow,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -46,21 +47,23 @@ pub fn run() -> Result<()> {
     let scale = config.scale.max(1);
     let pet_size = sheet.frame_size() as i32 * scale as i32;
     let surface_size = pet_size + SURFACE_PADDING * 2 + 24;
-    let bounds = Bounds {
-        width: 1920,
-        height: 1080,
-        pet_size,
-    };
+    let start_position = config.position.or(Some((32, 32)));
+    let bounds = start_position
+        .map(|(x, y)| screen_bounds_for_point(POINT { x, y }, pet_size))
+        .unwrap_or_else(|| virtual_screen_bounds(pet_size));
+    let mut brain = PetBrain::from_config(
+        nokk_core::pet::unix_time_seed(),
+        start_position,
+        config.last_pose,
+        config.mood,
+        config.paused,
+    );
+    let snapshot = brain.snapshot();
+    brain.set_position(snapshot.x, snapshot.y, bounds);
 
     let app = Box::new(WinApp {
         sheet,
-        brain: PetBrain::from_config(
-            nokk_core::pet::unix_time_seed(),
-            config.position.or(Some((32, 32))),
-            config.last_pose,
-            config.mood,
-            config.paused,
-        ),
+        brain,
         gesture: GestureTracker::default(),
         started: Instant::now(),
         scale,
@@ -103,6 +106,29 @@ impl WinApp {
         self.brain.tick(self.now_ms(), self.bounds);
     }
 
+    fn refresh_screen_bounds(&mut self) {
+        let snapshot = self.brain.snapshot();
+        self.refresh_screen_bounds_at(
+            snapshot.x + self.bounds.pet_size / 2,
+            snapshot.y + self.bounds.pet_size / 2,
+        );
+    }
+
+    fn refresh_screen_bounds_at(&mut self, screen_x: i32, screen_y: i32) {
+        let next_bounds = screen_bounds_for_point(
+            POINT {
+                x: screen_x,
+                y: screen_y,
+            },
+            self.bounds.pet_size,
+        );
+        if next_bounds != self.bounds {
+            self.bounds = next_bounds;
+            let snapshot = self.brain.snapshot();
+            self.brain.set_position(snapshot.x, snapshot.y, self.bounds);
+        }
+    }
+
     fn persist(&self) {
         let snapshot = self.brain.snapshot();
         let _ = AppConfig {
@@ -121,6 +147,7 @@ impl WinApp {
         let local_x = (x - SURFACE_PADDING) / self.scale as i32;
         let local_y = (y - SURFACE_PADDING) / self.scale as i32;
         if self.sheet.manifest().is_body_zone(local_x, local_y) {
+            self.refresh_screen_bounds_at(screen_x, screen_y);
             let snapshot = self.brain.snapshot();
             self.brain.begin_drag(self.now_ms());
             self.drag = Some(DragState {
@@ -141,6 +168,7 @@ impl WinApp {
             return false;
         };
 
+        self.refresh_screen_bounds_at(screen_x, screen_y);
         let target_x = screen_x - drag.screen_offset_x;
         let target_y = screen_y - drag.screen_offset_y;
         let dx = screen_x - drag.last_screen_x;
@@ -262,6 +290,13 @@ unsafe extern "system" fn window_proc(
         WM_TIMER => {
             if !app.is_null() {
                 (*app).tick();
+                render_layered(hwnd, &mut *app);
+            }
+            LRESULT(0)
+        }
+        WM_DISPLAYCHANGE => {
+            if !app.is_null() {
+                (*app).refresh_screen_bounds();
                 render_layered(hwnd, &mut *app);
             }
             LRESULT(0)
@@ -491,6 +526,63 @@ fn cursor_position() -> Option<POINT> {
             None
         }
     }
+}
+
+fn screen_bounds_for_point(point: POINT, pet_size: i32) -> Bounds {
+    monitor_bounds_for_point(point, pet_size).unwrap_or_else(|| virtual_screen_bounds(pet_size))
+}
+
+fn monitor_bounds_for_point(point: POINT, pet_size: i32) -> Option<Bounds> {
+    unsafe {
+        let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+        if monitor.is_invalid() {
+            return None;
+        }
+
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut info).is_ok() {
+            return None;
+        }
+
+        let rect = info.rcMonitor;
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        if width > 0 && height > 0 {
+            Some(Bounds::with_origin(
+                rect.left,
+                rect.top,
+                width.max(pet_size),
+                height.max(pet_size),
+                pet_size,
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+fn virtual_screen_bounds(pet_size: i32) -> Bounds {
+    unsafe {
+        let left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        let width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        let height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+        if width > 0 && height > 0 {
+            return Bounds::with_origin(
+                left,
+                top,
+                width.max(pet_size),
+                height.max(pet_size),
+                pet_size,
+            );
+        }
+    }
+
+    Bounds::new(1920, 1080, pet_size)
 }
 
 fn write_tip(dst: &mut [u16], tip: &str) {
