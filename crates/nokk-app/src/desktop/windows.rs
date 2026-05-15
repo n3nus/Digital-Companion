@@ -543,7 +543,7 @@ fn monitor_bounds_for_point(point: POINT, pet_size: i32) -> Option<Bounds> {
             cbSize: size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
-        if !GetMonitorInfoW(monitor, &mut info).is_ok() {
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
             return None;
         }
 
